@@ -4,17 +4,11 @@ import com.google.common.collect.*;
 
 import javax.annotation.Nonnull;
 
-import com.google.common.graph.Graph;
-import com.google.common.graph.ImmutableValueGraph;
-import com.google.common.graph.ValueGraph;
-import com.sun.jdi.connect.Transport;
 import uk.ac.bris.cs.scotlandyard.model.Board.GameState;
 import uk.ac.bris.cs.scotlandyard.model.Piece.MrX;
-import uk.ac.bris.cs.scotlandyard.model.Piece;
 import uk.ac.bris.cs.scotlandyard.model.ScotlandYard.Factory;
 
 import java.util.*;
-import java.util.stream.Collector;
 import java.util.stream.Collectors;
 
 /**
@@ -161,23 +155,29 @@ public final class MyGameStateFactory implements Factory<GameState> {
 			return log;
 		}
 
+		private Boolean mRxGotCaught() {
+			return detectives.stream().map(d -> d.location()).collect(Collectors.toSet()).contains(mrX.location());
+		}
+		private ImmutableSet<Piece> detectivesWon() {
+			return ImmutableSet.copyOf(detectives.stream().map(d -> d.piece()).collect(Collectors.toList()));
+		}
 		@Nonnull
 		@Override
 		public ImmutableSet<Piece> getWinner() {
+			if (this.winner != null && !this.winner.isEmpty()) return this.winner;
 			if (remaining.contains(mrX.piece())) {
-				if (getMrxSinlgeMoves().isEmpty()) {
-					return ImmutableSet.copyOf(detectives.stream().map(d -> d.piece()).collect(Collectors.toList()));
+				if (getMrxSingleMoves().isEmpty() || mRxGotCaught()) {
+					return detectivesWon();
 				}
-				if (this.log.size() > 21 || getDetectiveSingleMoves().isEmpty()) {
+				if (getFullDetectiveSingleMoves().isEmpty()) {
 					return ImmutableSet.of(mrX.piece());
 				}
 			} else {
-				if (getDetectiveSingleMoves().isEmpty()) {
+				if (getFullDetectiveSingleMoves().isEmpty()) {
 					return ImmutableSet.of(mrX.piece());
 				}
-				if (detectives.stream().map(d -> d.location()).collect(Collectors.toSet()).contains(mrX.location())
-						|| getMrxSinlgeMoves().isEmpty()) {
-					return ImmutableSet.copyOf(detectives.stream().map(d -> d.piece()).collect(Collectors.toList()));
+				if (mRxGotCaught()) {
+					return detectivesWon();
 				}
 			}
 			return ImmutableSet.of();
@@ -227,7 +227,17 @@ public final class MyGameStateFactory implements Factory<GameState> {
 			for (int i = 1; i < list.size(); i++) builder.add(list.get(i));
 			return builder.build();
 		}
-		private Set<Move.SingleMove> getDetectiveSingleMoves() {
+		private Set<Move.SingleMove> getFullDetectiveSingleMoves() {
+			Set<Move.SingleMove> singleMoves = new HashSet<>();
+
+			for (Player detective : detectives) {
+				for (Move.SingleMove m : makeSingleMoves(setup, detectives, detective, detective.location())) {
+					singleMoves.add(m);
+				}
+			}
+			return singleMoves;
+		}
+		private Set<Move.SingleMove> getDetectiveSingleMoves(ImmutableSet<Piece> remaining) {
 			Set<Move.SingleMove> singleMoves = new HashSet<>();
 
 			for (Player detective : detectives) {
@@ -239,19 +249,22 @@ public final class MyGameStateFactory implements Factory<GameState> {
 			}
 			return singleMoves;
 		}
-		private Set<Move.SingleMove> getMrxSinlgeMoves() {
+		private Set<Move.SingleMove> getMrxSingleMoves() {
 			return makeSingleMoves(setup, detectives, mrX, mrX.location());
 		}
 		@Nonnull
 		@Override
 		public ImmutableSet<Move> getAvailableMoves() {
-			if (!getWinner().isEmpty()) return ImmutableSet.of();
+			if (!winner.isEmpty()) {
+				return ImmutableSet.of();
+			}
+
 			Set<Move> moves = new HashSet<>();
 			Set<Move.SingleMove> singleMoves = new HashSet<>();
 			if (remaining.contains(mrX.piece())) {
-				singleMoves = getMrxSinlgeMoves();
+				singleMoves = getMrxSingleMoves();
 			} else {
-				singleMoves = getDetectiveSingleMoves();
+				singleMoves = getDetectiveSingleMoves(remaining);
 			}
 			for (Move.SingleMove m : singleMoves) {
 				moves.add(m);
@@ -266,6 +279,7 @@ public final class MyGameStateFactory implements Factory<GameState> {
 						}
 						if (!free) continue;
 
+						// Double move logic
 						if (remaining.contains(mrX.piece())) {
 							for (ScotlandYard.Transport t : setup.graph.edgeValueOrDefault(m.destination, destination, ImmutableSet.of())) {
 								// TODO find out if the player has the required tickets
@@ -323,7 +337,8 @@ public final class MyGameStateFactory implements Factory<GameState> {
 					var p = m.commencedBy();
 					if (p.isMrX()) {
 						return new MyGameState(
-								new GameSetup(setup.graph, tail(setup.moves)),
+								setup,
+								//new GameSetup(setup.graph, tail(setup.moves)),
 								ImmutableSet.copyOf(detectives.stream().map(d -> d.piece()).collect(Collectors.toList())),
 								getEntry(m),
 								mrX.use(m.ticket).at(m.destination),detectives
@@ -341,20 +356,32 @@ public final class MyGameStateFactory implements Factory<GameState> {
 					).collect(Collectors.toList());
 					var nR = ImmutableSet.copyOf(remaining.stream().filter(piece -> !piece.equals(m.commencedBy()))
 							.collect(Collectors.toList()));
-					if (nR.size() != remaining.size() - 1) {
-						System.out.println("Something wrong");
+					if (nR.isEmpty() || getDetectiveSingleMoves(nR).isEmpty()){
+						nR = ImmutableSet.of(mrX.piece());
+						if (setup.moves.size() == 1) {
+							// All moves are exhausted
+							if (mRxGotCaught()) {
+								MyGameState.this.winner = detectivesWon();
+							} else {
+								MyGameState.this.winner = ImmutableSet.of(mrX.piece());
+							}
+							MyGameState.this.moves = getAvailableMoves();
+							return MyGameState.this;
+						}
+						return new MyGameState(new GameSetup(setup.graph, tail(setup.moves)), nR, log, mrX.give(m.ticket), detectives);
 					}
-					return new MyGameState(new GameSetup(setup.graph, tail(setup.moves)), nR, log, mrX, detectives);
+					return new MyGameState(setup, nR, log, mrX.give(m.ticket), detectives);
 				}
 
 				public GameState visit(Move.DoubleMove m) {
 					var p = m.commencedBy();
 					if (!p.isMrX()) throw new IllegalArgumentException("Illegal move: " + move);
 					return new MyGameState(
-							new GameSetup(setup.graph, tail(tail(setup.moves))),
+							setup,
+							//new GameSetup(setup.graph, tail(tail(setup.moves))),
 							ImmutableSet.copyOf(detectives.stream().map(d -> d.piece()).collect(Collectors.toList())),
 							getDoubleEntry(m),
-							mrX.use(m.ticket1).use(m.ticket2).at(m.destination2),detectives
+							mrX.use(m.ticket1).use(m.ticket2).use(ScotlandYard.Ticket.DOUBLE).at(m.destination2),detectives
 					);
 				}
 			};
